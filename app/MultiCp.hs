@@ -1,20 +1,19 @@
 module MultiCp where
 
-import           Control.Monad.Reader (asks)
-import           Data.Foldable        (toList)
+import           Control.Lens         (view)
 import           Data.Sequence        (Seq(..))
 import qualified Data.Sequence        as Seq
 import           Lib
 import           Options.Applicative
-import           System.FilePath      ((</>), joinPath)
+import           System.FilePath      ((</>))
 import           UnliftIO.Directory   (listDirectory)
 
 multiCp :: FilePath -> FilePath -> Work ()
 multiCp source dest = do
-    mountPoint <- asks workContextMountPoint
+    mountPoint <- view mountPoint
 
     multi [Seq.empty] $ \pathPcs workerId -> do
-        let path = joinPath $ toList pathPcs
+        let path = foldr (</>) "" pathPcs
             sourcePath = source </> path
             destPath = mountPoint </> show workerId </> dest </> path
 

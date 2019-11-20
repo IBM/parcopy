@@ -24,6 +24,7 @@ dependencies:
 - containers
 - directory
 - filepath
+- lens
 - mtl
 - optparse-applicative
 - unliftio
