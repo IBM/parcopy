@@ -9,9 +9,8 @@ module Lib where
 
 import Control.Concurrent     (newMVar, withMVar)
 import Control.Exception.Lens (_IOException, catching_)
-import Control.Lens           (_Just, forOf_, makeFields, view)
+import Control.Lens           (_Just, forMOf_, makeFields, view)
 import Control.Monad.Reader   (ReaderT(..), liftIO, when)
-import Data.Function          (fix)
 import Options.Applicative
 import Prelude                hiding (log)
 import System.IO.Error.Lens   (_InappropriateType, errorType)
@@ -50,30 +49,33 @@ multi :: [a] -> (a -> Int -> Work [a]) -> Work ()
 multi initialWork processWork = do
     workStore <- newTVarIO initialWork
     numAtWorkSem <- newTVarIO (0 :: Int)
+    numThreads <- view numThreads
 
-    t <- view numThreads
-    forConcurrently_ [0 .. t - 1] $ \workerId -> flip fix [] $ \go newWork -> do
-        maybeItem <- atomically $ do
-            oldWork <- readTVar workStore
+    forConcurrently_ [0 .. numThreads - 1] $ \workerId -> do
+        let go newWork = do
+                maybeItem <- atomically $ do
+                    oldWork <- readTVar workStore
 
-            case newWork ++ oldWork of
-                -- More work.  Take an item and signal busy.
-                item : items -> do
-                    writeTVar workStore items
-                    modifyTVar' numAtWorkSem (+ 1)
-                    return $ Just item
+                    case newWork ++ oldWork of
+                        -- More work.  Take an item and signal busy.
+                        item : items -> do
+                            writeTVar workStore items
+                            modifyTVar' numAtWorkSem (+ 1)
+                            return $ Just item
 
-                -- No more work.  Unless all other workers are at rest, in which
-                -- case there's not *gonna* be any, wait for more.
-                [] -> readTVar numAtWorkSem >>= \case
-                    0 -> return Nothing
-                    _ -> retrySTM
+                        -- No more work.  Unless all other workers are at rest,
+                        -- in which case there won't be any, wait for more.
+                        [] -> readTVar numAtWorkSem >>= \case
+                            0 -> return Nothing
+                            _ -> retrySTM
 
-        -- If we took an item, process it, signal at rest, and go again.
-        forOf_ _Just maybeItem $ \item -> do
-            newWork' <- processWork item workerId
-            atomically $ modifyTVar' numAtWorkSem $ subtract 1
-            go newWork'
+                -- If we took an item, process it, signal at rest, and go again.
+                forMOf_ _Just maybeItem $ \item -> do
+                    newWork' <- processWork item workerId
+                    atomically $ modifyTVar' numAtWorkSem $ subtract 1
+                    go newWork'
+
+        go []
 
 tryFileTypes :: (Foldable t) => t (Work a) -> Work a
 tryFileTypes = foldr1 $ catching_ $
@@ -91,6 +93,7 @@ mkUtil desc workParser = do
     runReaderT work $ ctxWithLogger logger
 
     where
+
     parseCmdLine = execParser $ info (helper <*> params) $ mconcat [
         header desc,
         fullDesc]

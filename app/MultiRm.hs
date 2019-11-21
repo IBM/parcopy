@@ -3,7 +3,7 @@
 
 module MultiRm where
 
-import           Control.Lens        ((<%~), _init, at, forOf_, non, view)
+import           Control.Lens        ((<%~), _init, at, forMOf_, non, view)
 import           Control.Monad       (when)
 import qualified Data.Map.Strict     as Map
 import           Data.Sequence       (Seq(..))
@@ -29,7 +29,7 @@ multiRm target = do
             go exe pcs = do
                 run exe ["-v", toPath pcs]
 
-                forOf_ _init pcs $ \parentPcs -> do
+                forMOf_ _init pcs $ \parentPcs -> do
                     -- Decrement parent, removing it if it's zero, and report
                     -- the new count.
                     newCount <- atomicModifyIORef' entryCountsRef $
