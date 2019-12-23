@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
 
@@ -17,17 +18,15 @@ import           UnliftIO.IORef      (newIORef, atomicModifyIORef')
 
 multiRm :: FilePath -> Work ()
 multiRm target = do
-    mountPoint <- view mountPoint
     entryCountsRef <- newIORef Map.empty
 
-    multi [Seq.empty] $ \pathPcs workerId -> do
-        let toPath pcs =
-                mountPoint </> show workerId </> target </> foldr (</>) "" pcs
+    multi [Seq.empty] $ \pathPcs mount -> do
+        let toPath pcs = mount </> target </> foldr (</>) "" pcs
             path = toPath pathPcs
 
             -- Delete an item along with any newly empty dirs up the tree.
             go exe pcs = do
-                run exe ["-v", toPath pcs]
+                run Verbose exe ["-v", toPath pcs]
 
                 forMOf_ _init pcs $ \parentPcs -> do
                     -- Decrement parent, removing it if it's zero, and report
@@ -39,7 +38,7 @@ multiRm target = do
 
         tryFileTypes [
             listDirectory path >>= \case
-                -- Empty dir.  Delete it.
+                -- Empty dir.
                 [] -> do
                     go "rmdir" pathPcs
                     return []

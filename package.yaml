@@ -27,6 +27,8 @@ dependencies:
 - lens
 - mtl
 - optparse-applicative
+- resourcet
+- unix
 - unliftio
 - unliftio-core
 
