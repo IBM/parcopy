@@ -28,7 +28,9 @@ multiCp source dest = multi [Seq.empty] $ \pathPcs mount -> do
 
 main :: IO ()
 main = mkUtil "Recursive copy in parallel" $ multiCp <$> source <*> dest
+
     where
+
     source = strArgument $ mconcat [
         metavar "SOURCE",
         help "Directory to copy contents from"]

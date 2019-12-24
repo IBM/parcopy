@@ -6,7 +6,14 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TupleSections #-}
 
-module Lib where
+module Lib (
+    LogLevel(..),
+    Work,
+    multi,
+    mkUtil,
+    run,
+    tryFileTypes)
+where
 
 import Control.Concurrent
 import Control.Exception.Lens       (_IOException, catching_)
@@ -25,6 +32,10 @@ import System.Posix.User
 import UnliftIO.Async               (forConcurrently_)
 import UnliftIO.Process             (readProcess)
 import UnliftIO.STM
+
+-----------
+-- Types --
+-----------
 
 data LogLevel
     = Quiet
@@ -59,13 +70,19 @@ data SetupContext
         setupContextCredFile   :: FilePath}
 makeFields ''SetupContext
 
-log :: (HasLogger r Logger, MonadReader r m, MonadIO m) =>
+type Setup = ReaderT SetupContext (ResourceT IO)
+
+-----------------------
+-- General utilities --
+-----------------------
+
+log :: (HasLogger r Logger, MonadIO m, MonadReader r m) =>
     LogLevel -> String -> m ()
 log lvl msg = do
     logger <- view logger
     liftIO $ logger lvl msg
 
-run :: (HasLogger r Logger, MonadReader r m, MonadIO m) =>
+run :: (HasLogger r Logger, MonadIO m, MonadReader r m) =>
     LogLevel -> FilePath -> [String] -> m ()
 run lvl exe args = do
     log Debug $ unwords $ "Starting" : exe : args
@@ -74,39 +91,6 @@ run lvl exe args = do
 fix1 :: a -> ((a -> b) -> a -> b) -> b
 fix1 x f = fix f x
 
-multi :: [a] -> (a -> FilePath -> Work [a]) -> Work ()
-multi initialWork processWork = do
-    workStore <- newTVarIO initialWork
-    numAtWorkSem <- newTVarIO (0 :: Int)
-    mounts <- view mounts
-
-    forConcurrently_ mounts $ \mount -> fix1 [] $ \go newWork -> do
-        maybeItem <- atomically $ do
-            oldWork <- readTVar workStore
-
-            case newWork ++ oldWork of
-                -- More work.  Take an item and signal busy.
-                item : items -> do
-                    writeTVar workStore items
-                    modifyTVar' numAtWorkSem (+ 1)
-                    return $ Just item
-
-                -- No more work.  Unless all other workers are at rest,
-                -- in which case there won't be any, wait for more.
-                [] -> readTVar numAtWorkSem >>= \case
-                    0 -> return Nothing
-                    _ -> retrySTM
-
-        -- If we took an item, process it, signal at rest, and go again.
-        forMOf_ _Just maybeItem $ \item -> do
-            newWork' <- processWork item mount
-            atomically $ modifyTVar' numAtWorkSem $ subtract 1
-            go newWork'
-
-tryFileTypes :: (Foldable t) => t (Work a) -> Work a
-tryFileTypes = foldr1 $ catching_ $
-    _IOException . errorType . _InappropriateType
-
 -- Like allocate, but actions have access to an environment.
 allocate' :: (MonadResource m, MonadReader r m) =>
     (ReaderT r IO a) -> (a -> ReaderT r IO ()) -> m (ReleaseKey, a)
@@ -114,7 +98,48 @@ allocate' now later = do
     ctx <- ask
     allocate (runReaderT now ctx) (\x -> runReaderT (later x) ctx)
 
-setupMounts :: ReaderT SetupContext (ResourceT IO) [FilePath]
+-----------
+-- Setup --
+-----------
+
+-- We need to be real root for mount(8) and umount(8).  In between, we should do
+-- file ops as normal user.  The solution for now is forkProcess; see
+-- https://github.com/haskell/unix/issues/62 for caveats.
+setupParent :: Setup (Work ())
+setupParent = do
+    origUid <- changeUid 0
+    origGid <- changeGid 0
+    origNumCap <- changeNumCap 1
+
+    -- Action to restore all of the above in the child.
+    return $ do
+        changeNumCap origNumCap
+        changeGid origGid
+        changeUid origUid
+        return ()
+
+    where
+
+    changeUid uid = do
+        oldUid <- liftIO getRealUserID
+        log Debug $ "Was UID " ++ show oldUid ++ "...\n"
+        liftIO $ setUserID uid
+        log Debug $ "Am UID " ++ show uid ++ "\n"
+        return oldUid
+    changeGid gid = do
+        oldGid <- liftIO getRealGroupID
+        log Debug $ "Was GID " ++ show oldGid ++ "...\n"
+        liftIO $ setGroupID gid
+        log Debug $ "Am GID " ++ show gid ++ "\n"
+        return oldGid
+    changeNumCap numCap = do
+        oldNumCap <- liftIO getNumCapabilities
+        log Debug $ "Had " ++ show oldNumCap ++ " thread(s)...\n"
+        liftIO $ setNumCapabilities 1
+        log Debug $ "Have " ++ show numCap ++ " thread(s)\n"
+        return oldNumCap
+
+setupMounts :: Setup [FilePath]
 setupMounts = do
     (_, parentDir) <- allocate' createTempDir removeDir
 
@@ -152,6 +177,43 @@ setupMounts = do
                 "serverino"]]
     umount dir = run Debug "umount" ["-v", "-l", dir]
 
+-----------------
+-- Application --
+-----------------
+
+multi :: [a] -> (a -> FilePath -> Work [a]) -> Work ()
+multi initialWork processWork = do
+    workStore <- newTVarIO initialWork
+    numAtWorkSem <- newTVarIO (0 :: Int)
+    mounts <- view mounts
+
+    forConcurrently_ mounts $ \mount -> fix1 [] $ \go newWork -> do
+        maybeItem <- atomically $ do
+            oldWork <- readTVar workStore
+
+            case newWork ++ oldWork of
+                -- More work.  Take an item and signal busy.
+                item : items -> do
+                    writeTVar workStore items
+                    modifyTVar' numAtWorkSem (+ 1)
+                    return $ Just item
+
+                -- No more work.  Unless all other workers are at rest, in which
+                -- case there won't be any, wait for more.
+                [] -> readTVar numAtWorkSem >>= \case
+                    0 -> return Nothing
+                    _ -> retrySTM
+
+        -- If we took an item, process it, signal at rest, and go again.
+        forMOf_ _Just maybeItem $ \item -> do
+            newWork' <- processWork item mount
+            atomically $ modifyTVar' numAtWorkSem $ subtract 1
+            go newWork'
+
+tryFileTypes :: (Foldable t) => t (Work a) -> Work a
+tryFileTypes = foldr1 $ catching_ $
+    _IOException . errorType . _InappropriateType
+
 mkUtil :: String -> Parser (Work ()) -> IO ()
 mkUtil desc workParser = do
     config <- parseCmdLine desc workParser
@@ -163,63 +225,17 @@ mkUtil desc workParser = do
             withMVar mutex $ \_ -> putStrLn msg
 
     runResourceT $ do
-        let setupCtx = SetupContext {
-                setupContextLogger     = logger,
-                setupContextNumThreads = config ^. numThreads,
-                setupContextUncName    = config ^. uncName,
-                setupContextCredFile   = config ^. credFile}
+        let setup = (,) <$> setupParent <*> setupMounts
+        (setupChild, mounts) <- runReaderT setup $ SetupContext {
+            setupContextLogger     = logger,
+            setupContextNumThreads = config ^. numThreads,
+            setupContextUncName    = config ^. uncName,
+            setupContextCredFile   = config ^. credFile}
 
-        (setupChild, mounts) <- flip runReaderT setupCtx $
-            (,) <$> setupParent <*> setupMounts
-
-        let workCtx = WorkContext {
-                workContextLogger = logger,
-                workContextMounts = mounts}
-
-        lift $ flip runReaderT workCtx $ do
-            log Debug "Parent: forking...\n"
-            pid <- withRunInIO $ \runInIO -> forkProcess $ runInIO $ do
-                log Debug "Child: forked\n"
-                setupChild
-                config ^. work
-
-            maybeStatus <- liftIO $ getProcessStatus True True pid
-            log Debug $ "Child's status was " ++ show maybeStatus ++ "\n"
-
-    where
-
-    -- We need to be real root for mount(8) and umount(8).  In between, we
-    -- should do file ops as normal user.  The solution for now is forkProcess;
-    -- see https://github.com/haskell/unix/issues/62 for caveats.
-    setupParent = do
-        origUid <- changeUid 0
-        origGid <- changeGid 0
-        origNumCap <- changeNumCap 1
-
-        -- Action to restore all of the above.
-        return $ do
-            changeNumCap origNumCap
-            changeGid origGid
-            changeUid origUid
-
-    changeUid uid = do
-        oldUid <- liftIO getRealUserID
-        log Debug $ "Was UID " ++ show oldUid ++ "...\n"
-        liftIO $ setUserID uid
-        log Debug $ "Am UID " ++ show uid ++ "\n"
-        return oldUid
-    changeGid gid = do
-        oldGid <- liftIO getRealGroupID
-        log Debug $ "Was GID " ++ show oldGid ++ "...\n"
-        liftIO $ setGroupID gid
-        log Debug $ "Am GID " ++ show gid ++ "\n"
-        return oldGid
-    changeNumCap numCap = do
-        oldNumCap <- liftIO getNumCapabilities
-        log Debug $ "Had " ++ show oldNumCap ++ " thread(s)...\n"
-        liftIO $ setNumCapabilities 1
-        log Debug $ "Have " ++ show numCap ++ " thread(s)\n"
-        return oldNumCap
+        let forkedWork = forkAndWait $ setupChild >> config ^. work
+        lift $ runReaderT forkedWork $ WorkContext {
+            workContextLogger = logger,
+            workContextMounts = mounts}
 
 parseCmdLine :: String -> Parser (Work ()) -> IO Config
 parseCmdLine desc workParser = execParser $ info (helper <*> params) $ mconcat [
@@ -259,3 +275,13 @@ parseCmdLine desc workParser = execParser $ info (helper <*> params) $ mconcat [
             configUncName    = uncName,
             configCredFile   = credFile,
             configWork       = work}
+
+forkAndWait :: Work () -> Work ()
+forkAndWait action = do
+    log Debug "Parent: forking...\n"
+    pid <- withRunInIO $ \runInIO -> forkProcess $ runInIO $ do
+        log Debug "Child: forked\n"
+        action
+
+    maybeStatus <- liftIO $ getProcessStatus True True pid
+    log Debug $ "Child's status was " ++ show maybeStatus ++ "\n"

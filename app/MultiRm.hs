@@ -57,7 +57,9 @@ multiRm target = do
 
 main :: IO ()
 main = mkUtil "Recursive delete in parallel" $ multiRm <$> target
+
     where
+
     target = strArgument $ mconcat [
         metavar "TARGET",
         help "Directory to remove"]
