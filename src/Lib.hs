@@ -30,6 +30,7 @@ import System.Posix.Process         (forkProcess, getProcessStatus)
 import System.Posix.Temp            (mkdtemp)
 import System.Posix.User
 import UnliftIO.Async               (forConcurrently_)
+import UnliftIO.Directory           (makeAbsolute)
 import UnliftIO.Process             (readProcess)
 import UnliftIO.STM
 
@@ -163,7 +164,7 @@ setupMounts = do
     removeDir dir = run Debug "rmdir" ["-v", dir]
     mountCifs dir = do
         uncName <- view uncName
-        credFile <- view credFile
+        credFile <- view credFile >>= makeAbsolute
         run Debug "mount" [
             "-v",
             "-t", "cifs",
