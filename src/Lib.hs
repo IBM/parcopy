@@ -9,6 +9,7 @@
 module Lib (
     LogLevel(..),
     Work,
+    log,
     multi,
     mkUtil,
     run,
@@ -17,7 +18,7 @@ where
 
 import Control.Concurrent
 import Control.Exception.Lens       (_IOException, catching_)
-import Control.Lens                 ((^.), _Just, forMOf_, makeFields, view)
+import Control.Lens
 import Control.Monad.IO.Unlift      (withRunInIO)
 import Control.Monad.Reader
 import Control.Monad.Trans.Resource
@@ -26,8 +27,10 @@ import Options.Applicative
 import Prelude                      hiding (log)
 import System.FilePath              ((</>))
 import System.IO.Error.Lens         (_InappropriateType, errorType)
+import System.Posix.Files           (setOwnerAndGroup)
 import System.Posix.Process         (forkProcess, getProcessStatus)
 import System.Posix.Temp            (mkdtemp)
+import System.Posix.Types           (GroupID, UserID)
 import System.Posix.User
 import UnliftIO.Async               (forConcurrently_)
 import UnliftIO.Directory           (makeAbsolute)
@@ -65,10 +68,11 @@ makeFields ''Config
 
 data SetupContext
     = SetupContext {
-        setupContextLogger     :: Logger,
-        setupContextNumThreads :: Int,
-        setupContextUncName    :: String,
-        setupContextCredFile   :: FilePath}
+        setupContextLogger         :: Logger,
+        setupContextOrigUidGidNcap :: (UserID, GroupID, Int),
+        setupContextNumThreads     :: Int,
+        setupContextUncName        :: String,
+        setupContextCredFile       :: FilePath}
 makeFields ''SetupContext
 
 type Setup = ReaderT SetupContext (ResourceT IO)
@@ -76,6 +80,11 @@ type Setup = ReaderT SetupContext (ResourceT IO)
 -----------------------
 -- General utilities --
 -----------------------
+
+chompNewlines :: String -> String
+chompNewlines s = case span (== '\n') s of
+    (newlines, c : cs) -> newlines ++ c : chompNewlines cs
+    _                  -> ""
 
 log :: (HasLogger r Logger, MonadIO m, MonadReader r m) =>
     LogLevel -> String -> m ()
@@ -108,37 +117,30 @@ allocate' now later = do
 -- https://github.com/haskell/unix/issues/62 for caveats.
 setupParent :: Setup (Work ())
 setupParent = do
-    origUid <- changeUid 0
-    origGid <- changeGid 0
-    origNumCap <- changeNumCap 1
+    changeUid 0
+    changeGid 0
+    changeNumCap 1
 
     -- Action to restore all of the above in the child.
-    return $ do
-        changeNumCap origNumCap
-        changeGid origGid
-        changeUid origUid
-        return ()
+    views origUidGidNcap $ \(uid, gid, ncap) -> do
+        changeNumCap ncap
+        changeGid gid
+        changeUid uid
 
     where
 
     changeUid uid = do
-        oldUid <- liftIO getRealUserID
-        log Debug $ "Was UID " ++ show oldUid ++ "...\n"
+        log Debug $ "Setting UID to " ++ show uid ++ "..."
         liftIO $ setUserID uid
-        log Debug $ "Am UID " ++ show uid ++ "\n"
-        return oldUid
+        log Debug $ "Set UID to " ++ show uid
     changeGid gid = do
-        oldGid <- liftIO getRealGroupID
-        log Debug $ "Was GID " ++ show oldGid ++ "...\n"
+        log Debug $ "Setting GID to " ++ show gid ++ "..."
         liftIO $ setGroupID gid
-        log Debug $ "Am GID " ++ show gid ++ "\n"
-        return oldGid
+        log Debug $ "Set GID to " ++ show gid
     changeNumCap numCap = do
-        oldNumCap <- liftIO getNumCapabilities
-        log Debug $ "Had " ++ show oldNumCap ++ " thread(s)...\n"
-        liftIO $ setNumCapabilities 1
-        log Debug $ "Have " ++ show numCap ++ " thread(s)\n"
-        return oldNumCap
+        log Debug $ "Setting number of capabilities to " ++ show numCap ++ "..."
+        liftIO $ setNumCapabilities numCap
+        log Debug $ "Set number of capabilities to " ++ show numCap
 
 setupMounts :: Setup [FilePath]
 setupMounts = do
@@ -155,12 +157,20 @@ setupMounts = do
     where
 
     createTempDir = do
-        log Debug "Creating temporary directory...\n"
-        dir <- liftIO $ mkdtemp "/tmp/multicp-"
-        log Debug $ "Created temporary directory " ++ dir ++ "\n"
-        run Debug "stat" [dir]
+        log Debug "Creating temporary directory..."
+        dir <- liftIO $ mkdtemp "/opt/multicp-"
+        log Debug $ "Created temporary directory " ++ dir
+        chownOrig dir
         return dir
-    createDir dir = run Debug "mkdir" ["-v", dir]
+    createDir dir = do
+        run Debug "mkdir" ["-v", dir]
+        chownOrig dir
+    chownOrig file = do
+        (uid, gid, _) <- view origUidGidNcap
+        let msg = file ++ " " ++ show uid ++ ":" ++ show gid
+        log Debug $ "Chowning " ++ msg ++ "..."
+        liftIO $ setOwnerAndGroup file uid gid
+        log Debug $ "Chowned " ++ msg
     removeDir dir = run Debug "rmdir" ["-v", dir]
     mountCifs dir = do
         uncName <- view uncName
@@ -186,8 +196,8 @@ multi :: [a] -> (a -> FilePath -> Work [a]) -> Work ()
 multi initialWork processWork = do
     workStore <- newTVarIO initialWork
     numAtWorkSem <- newTVarIO (0 :: Int)
-    mounts <- view mounts
 
+    mounts <- view mounts
     forConcurrently_ mounts $ \mount -> fix1 [] $ \go newWork -> do
         maybeItem <- atomically $ do
             oldWork <- readTVar workStore
@@ -223,15 +233,21 @@ mkUtil desc workParser = do
     logger <- do
         mutex <- newMVar ()
         return $ \lvl msg -> when (lvl <= config ^. logLevel) $
-            withMVar mutex $ \_ -> putStrLn msg
+            withMVar mutex $ \_ -> putStrLn $ chompNewlines msg
+
+    origUidGidNcap <- liftM3 (,,)
+        getRealUserID
+        getRealGroupID
+        getNumCapabilities
 
     runResourceT $ do
         let setup = (,) <$> setupParent <*> setupMounts
         (setupChild, mounts) <- runReaderT setup $ SetupContext {
-            setupContextLogger     = logger,
-            setupContextNumThreads = config ^. numThreads,
-            setupContextUncName    = config ^. uncName,
-            setupContextCredFile   = config ^. credFile}
+            setupContextLogger         = logger,
+            setupContextOrigUidGidNcap = origUidGidNcap,
+            setupContextNumThreads     = config ^. numThreads,
+            setupContextUncName        = config ^. uncName,
+            setupContextCredFile       = config ^. credFile}
 
         let forkedWork = forkAndWait $ setupChild >> config ^. work
         lift $ runReaderT forkedWork $ WorkContext {
@@ -279,10 +295,10 @@ parseCmdLine desc workParser = execParser $ info (helper <*> params) $ mconcat [
 
 forkAndWait :: Work () -> Work ()
 forkAndWait action = do
-    log Debug "Parent: forking...\n"
+    log Debug "Parent: forking..."
     pid <- withRunInIO $ \runInIO -> forkProcess $ runInIO $ do
-        log Debug "Child: forked\n"
+        log Debug "Child: forked"
         action
 
     maybeStatus <- liftIO $ getProcessStatus True True pid
-    log Debug $ "Child's status was " ++ show maybeStatus ++ "\n"
+    log Debug $ "Child's status was " ++ show maybeStatus
