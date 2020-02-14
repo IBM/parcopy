@@ -275,8 +275,9 @@ parseCmdLine desc workParser = execParser $ info (helper <*> params) $ mconcat [
             short 't',
             long "threads",
             metavar "INT",
-            value 1,
-            showDefault]
+            value 4,
+            showDefault,
+            help "How many parallel connections to establish"]
         uncName <- strOption $ mconcat [
             short 'n',
             long "share-name",
@@ -284,8 +285,9 @@ parseCmdLine desc workParser = execParser $ info (helper <*> params) $ mconcat [
             help "The UNC name of the SMB share"]
         credFile <- strOption $ mconcat [
             short 'c',
-            long "credentials-file",
-            metavar "FILENAME"]
+            long "credentials",
+            metavar "FILENAME",
+            help "The credentials file to pass to mount.cifs(8)"]
         work <- workParser
 
         pure $ Config {
