@@ -2,7 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
 
-module MultiRm where
+module ParRm where
 
 import           Control.Lens        ((<%~), _init, at, forMOf_, non, view)
 import           Control.Monad       (when)
@@ -16,8 +16,8 @@ import           System.FilePath     ((</>))
 import           UnliftIO.Directory  (listDirectory)
 import           UnliftIO.IORef      (newIORef, atomicModifyIORef')
 
-multiRm :: FilePath -> Work ()
-multiRm target = do
+parRm :: FilePath -> Work ()
+parRm target = do
     entryCountsRef <- newIORef Map.empty
 
     multi [Seq.empty] $ \pathPcs mount -> do
@@ -56,7 +56,7 @@ multiRm target = do
                 return []]
 
 main :: IO ()
-main = mkUtil "Recursive delete in parallel" $ multiRm <$> target
+main = mkUtil "Recursive delete in parallel" $ parRm <$> target
 
     where
 

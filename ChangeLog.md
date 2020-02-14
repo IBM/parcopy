@@ -1,3 +1,3 @@
-# Changelog for multicp
+# Changelog for parcopy
 
 ## Unreleased changes

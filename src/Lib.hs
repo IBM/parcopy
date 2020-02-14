@@ -34,6 +34,7 @@ import System.Posix.Types           (GroupID, UserID)
 import System.Posix.User
 import UnliftIO.Async               (forConcurrently_)
 import UnliftIO.Directory           (makeAbsolute)
+import UnliftIO.Environment         (getProgName)
 import UnliftIO.Process             (readProcess)
 import UnliftIO.STM
 
@@ -158,7 +159,8 @@ setupMounts = do
 
     createTempDir = do
         log Debug "Creating temporary directory..."
-        dir <- liftIO $ mkdtemp "/opt/multicp-"
+        progName <- getProgName
+        dir <- liftIO $ mkdtemp $ "/tmp" </> progName ++ "-"
         log Debug $ "Created temporary directory " ++ dir
         chownOrig dir
         return dir
@@ -221,7 +223,7 @@ multi initialWork processWork = do
             atomically $ modifyTVar' numAtWorkSem $ subtract 1
             go newWork'
 
-tryFileTypes :: (Foldable t) => t (Work a) -> Work a
+tryFileTypes :: [Work a] -> Work a
 tryFileTypes = foldr1 $ catching_ $
     _IOException . errorType . _InappropriateType
 

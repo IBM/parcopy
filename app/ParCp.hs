@@ -1,4 +1,4 @@
-module MultiCp where
+module ParCp where
 
 import           Control.Lens        (view)
 import           Data.Sequence       (Seq(..))
@@ -8,8 +8,8 @@ import           Options.Applicative
 import           System.FilePath     ((</>))
 import           UnliftIO.Directory  (listDirectory)
 
-multiCp :: FilePath -> FilePath -> Work ()
-multiCp source dest = multi [Seq.empty] $ \pathPcs mount -> do
+parCp :: FilePath -> FilePath -> Work ()
+parCp source dest = multi [Seq.empty] $ \pathPcs mount -> do
     let path = foldr (</>) "" pathPcs
         sourcePath = source </> path
         destPath = mount </> dest </> path
@@ -27,7 +27,7 @@ multiCp source dest = multi [Seq.empty] $ \pathPcs mount -> do
             return []]
 
 main :: IO ()
-main = mkUtil "Recursive copy in parallel" $ multiCp <$> source <*> dest
+main = mkUtil "Recursive copy in parallel" $ parCp <$> source <*> dest
 
     where
 
