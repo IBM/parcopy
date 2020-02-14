@@ -1,7 +1,7 @@
 name:                parcopy
 version:             0.1.0.0
 github:              "IBM/parcopy"
-license:             BSD3
+license:             Apache-2.0
 author:              "Shlomo Shuck"
 maintainer:          "sjshuck@us.ibm.com"
 copyright:           "2019-2020 IBM Corporation"
