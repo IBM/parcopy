@@ -1,0 +1,25 @@
+cradle:
+  stack:
+    - path: "./src"
+      component: "parcopy:lib"
+
+    - path: "./app/ParCp.hs"
+      component: "parcopy:exe:parcp"
+
+    - path: "./app/ParRm.hs"
+      component: "parcopy:exe:parcp"
+
+    - path: "./app/Paths_parcopy.hs"
+      component: "parcopy:exe:parcp"
+
+    - path: "./app/ParRm.hs"
+      component: "parcopy:exe:parrm"
+
+    - path: "./app/ParCp.hs"
+      component: "parcopy:exe:parrm"
+
+    - path: "./app/Paths_parcopy.hs"
+      component: "parcopy:exe:parrm"
+
+    - path: "./test"
+      component: "parcopy:test:parcopy-test"
